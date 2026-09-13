@@ -1,9 +1,4 @@
 #!/usr/bin/env python3
-"""
-ELAN2513 Native Touchscreen Driver Daemon
-Copyright (c) 2026
-Licensed under the MIT License
-"""
 import os, fcntl, time
 from evdev import UInput, AbsInfo, ecodes as e
 
@@ -30,7 +25,7 @@ def main():
     fd = os.open(BUS_PATH, os.O_RDWR)
     try:
         fcntl.ioctl(fd, I2C_SLAVE, ADDR)
-        # Send Power ON opcode
+        # Power ON
         os.write(fd, bytes([0x05, 0x00, 0x00, 0x08]))
         time.sleep(0.05)
         
