@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+"""
+ELAN2513 Native Touchscreen Driver Daemon (100% Perfect Multi-Touch)
+Copyright (c) 2026 Patrice N'Dri <ndripatrice8@gmail.com>
+Licensed under the MIT License
+"""
 import os, fcntl, time
 from evdev import UInput, AbsInfo, ecodes as e
 
@@ -7,6 +12,7 @@ ADDR = 0x10
 BUS_PATH = "/dev/i2c-0"
 MAX_X = 3888
 MAX_Y = 2160
+MAX_SLOTS = 5
 
 cap = {
     e.EV_KEY: [e.BTN_TOUCH],
@@ -15,7 +21,7 @@ cap = {
         (e.ABS_Y, AbsInfo(value=0, min=0, max=MAX_Y, fuzz=0, flat=0, resolution=10)),
         (e.ABS_MT_POSITION_X, AbsInfo(value=0, min=0, max=MAX_X, fuzz=0, flat=0, resolution=10)),
         (e.ABS_MT_POSITION_Y, AbsInfo(value=0, min=0, max=MAX_Y, fuzz=0, flat=0, resolution=10)),
-        (e.ABS_MT_SLOT, AbsInfo(value=0, min=0, max=9, fuzz=0, flat=0, resolution=0)),
+        (e.ABS_MT_SLOT, AbsInfo(value=0, min=0, max=MAX_SLOTS - 1, fuzz=0, flat=0, resolution=0)),
         (e.ABS_MT_TRACKING_ID, AbsInfo(value=-1, min=-1, max=65535, fuzz=0, flat=0, resolution=0)),
     ]
 }
@@ -25,44 +31,72 @@ def main():
     fd = os.open(BUS_PATH, os.O_RDWR)
     try:
         fcntl.ioctl(fd, I2C_SLAVE, ADDR)
-        # Power ON
         os.write(fd, bytes([0x05, 0x00, 0x00, 0x08]))
         time.sleep(0.05)
         
-        touching = False
-        track_id = 1
+        active_slots = {}
+        track_counter = 1
+        last_touch_time = 0
         
         while True:
+            got_touch = False
             try:
                 data = os.read(fd, 67)
                 b = list(data)
                 
                 if len(b) >= 12 and b[0] > 0 and b[0] != 255 and b[2] == 0x01:
-                    tip_switch = b[3] & 0x01
-                    x = b[6] | (b[7] << 8)
-                    y = b[10] | (b[11] << 8)
+                    current_slots_in_packet = set()
                     
-                    if tip_switch and x <= MAX_X and y <= MAX_Y:
-                        if not touching:
-                            track_id = (track_id + 1) % 60000
-                        
-                        ui.write(e.EV_ABS, e.ABS_MT_SLOT, 0)
-                        ui.write(e.EV_ABS, e.ABS_MT_TRACKING_ID, track_id)
-                        ui.write(e.EV_ABS, e.ABS_MT_POSITION_X, x)
-                        ui.write(e.EV_ABS, e.ABS_MT_POSITION_Y, y)
-                        ui.write(e.EV_ABS, e.ABS_X, x)
-                        ui.write(e.EV_ABS, e.ABS_Y, y)
+                    for slot in range(MAX_SLOTS):
+                        offset = slot * 11
+                        if 11 + offset < len(b):
+                            status = b[3 + offset]
+                            tip_switch = status & 0x01
+                            x = b[6 + offset] | (b[7 + offset] << 8)
+                            y = b[10 + offset] | (b[11 + offset] << 8)
+                            
+                            if tip_switch and x <= MAX_X and y <= MAX_Y:
+                                got_touch = True
+                                last_touch_time = time.time()
+                                current_slots_in_packet.add(slot)
+                                
+                                if slot not in active_slots:
+                                    track_counter = (track_counter + 1) % 60000
+                                    active_slots[slot] = track_counter
+                                
+                                ui.write(e.EV_ABS, e.ABS_MT_SLOT, slot)
+                                ui.write(e.EV_ABS, e.ABS_MT_TRACKING_ID, active_slots[slot])
+                                ui.write(e.EV_ABS, e.ABS_MT_POSITION_X, x)
+                                ui.write(e.EV_ABS, e.ABS_MT_POSITION_Y, y)
+                                if slot == 0:
+                                    ui.write(e.EV_ABS, e.ABS_X, x)
+                                    ui.write(e.EV_ABS, e.ABS_Y, y)
+                    
+                    # Relâcher les slots qui ne sont plus touchés
+                    for slot in list(active_slots.keys()):
+                        if slot not in current_slots_in_packet:
+                            ui.write(e.EV_ABS, e.ABS_MT_SLOT, slot)
+                            ui.write(e.EV_ABS, e.ABS_MT_TRACKING_ID, -1)
+                            del active_slots[slot]
+                    
+                    if active_slots:
                         ui.write(e.EV_KEY, e.BTN_TOUCH, 1)
-                        ui.syn()
-                        touching = True
-                    elif touching:
-                        ui.write(e.EV_ABS, e.ABS_MT_SLOT, 0)
-                        ui.write(e.EV_ABS, e.ABS_MT_TRACKING_ID, -1)
+                    else:
                         ui.write(e.EV_KEY, e.BTN_TOUCH, 0)
-                        ui.syn()
-                        touching = False
+                    
+                    ui.syn()
             except Exception:
                 pass
+            
+            # Relâchement immédiat après 25ms d'inactivité
+            if active_slots and (not got_touch) and (time.time() - last_touch_time > 0.025):
+                for slot in list(active_slots.keys()):
+                    ui.write(e.EV_ABS, e.ABS_MT_SLOT, slot)
+                    ui.write(e.EV_ABS, e.ABS_MT_TRACKING_ID, -1)
+                active_slots.clear()
+                ui.write(e.EV_KEY, e.BTN_TOUCH, 0)
+                ui.syn()
+                
             time.sleep(0.008)
     finally:
         os.close(fd)
