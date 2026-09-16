@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-ELAN2513 Native Touchscreen Driver Daemon (100% Perfect Multi-Touch)
+ELAN2513 Native Touchscreen Driver Daemon (With Auto-Recovery & Keep-Alive)
 Copyright (c) 2026 Patrice N'Dri <ndripatrice8@gmail.com>
 Licensed under the MIT License
 """
@@ -26,20 +26,38 @@ cap = {
     ]
 }
 
+def open_i2c():
+    fd = os.open(BUS_PATH, os.O_RDWR)
+    fcntl.ioctl(fd, I2C_SLAVE, ADDR)
+    try:
+        os.write(fd, bytes([0x05, 0x00, 0x00, 0x08]))
+    except Exception:
+        pass
+    time.sleep(0.05)
+    return fd
+
 def main():
     ui = UInput(cap, name="ELAN2513 Touchscreen", vendor=0x04f3, product=0x2c3f, input_props=[e.INPUT_PROP_DIRECT])
-    fd = os.open(BUS_PATH, os.O_RDWR)
+    fd = None
+    
     try:
-        fcntl.ioctl(fd, I2C_SLAVE, ADDR)
-        os.write(fd, bytes([0x05, 0x00, 0x00, 0x08]))
-        time.sleep(0.05)
-        
+        fd = open_i2c()
         active_slots = {}
         track_counter = 1
         last_touch_time = 0
+        last_keepalive = time.time()
         
         while True:
             got_touch = False
+            
+            # Keep-Alive Power ON toutes les 30s d'inactivité
+            if time.time() - last_keepalive > 30:
+                try:
+                    os.write(fd, bytes([0x05, 0x00, 0x00, 0x08]))
+                except Exception:
+                    pass
+                last_keepalive = time.time()
+                
             try:
                 data = os.read(fd, 67)
                 b = list(data)
@@ -72,7 +90,6 @@ def main():
                                     ui.write(e.EV_ABS, e.ABS_X, x)
                                     ui.write(e.EV_ABS, e.ABS_Y, y)
                     
-                    # Relâcher les slots qui ne sont plus touchés
                     for slot in list(active_slots.keys()):
                         if slot not in current_slots_in_packet:
                             ui.write(e.EV_ABS, e.ABS_MT_SLOT, slot)
@@ -86,9 +103,15 @@ def main():
                     
                     ui.syn()
             except Exception:
-                pass
+                # Auto-récupération I2C en cas de micro-coupure bus
+                try:
+                    if fd is not None:
+                        os.close(fd)
+                    time.sleep(0.5)
+                    fd = open_i2c()
+                except Exception:
+                    pass
             
-            # Relâchement immédiat après 25ms d'inactivité
             if active_slots and (not got_touch) and (time.time() - last_touch_time > 0.025):
                 for slot in list(active_slots.keys()):
                     ui.write(e.EV_ABS, e.ABS_MT_SLOT, slot)
@@ -99,7 +122,8 @@ def main():
                 
             time.sleep(0.008)
     finally:
-        os.close(fd)
+        if fd is not None:
+            os.close(fd)
         ui.close()
 
 if __name__ == "__main__":
